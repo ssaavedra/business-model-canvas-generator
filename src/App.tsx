@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import pagesFile from '../form-pages.json'
+import promptsFile from '../prompts.json'
 import './App.css'
 
 type FormItem = {
@@ -24,9 +25,36 @@ type StatusMessage = {
   text: string
 }
 
+type PromptMap = Record<string, string>
+
+type PerplexityChatMessageContentChunk = {
+  type?: string
+  text?: string
+  [key: string]: unknown
+}
+
+type PerplexityChatMessage = {
+  role: 'system' | 'user' | 'assistant'
+  content: string | PerplexityChatMessageContentChunk[]
+}
+
+type PerplexityChatCompletionChoice = {
+  index: number
+  message?: PerplexityChatMessage
+}
+
+type PerplexityChatCompletionResponse = {
+  choices?: PerplexityChatCompletionChoice[]
+}
+
 const { pages: formPages } = pagesFile as FormPagesFile
+const prompts = promptsFile as PromptMap
+const tamsamsomPrompt = (prompts?.tamsamsom ?? '').trim()
 const summaryStepIndex = formPages.length
 const stepLabels = [...formPages.map((page) => page.title), 'Resumen']
+const tamSamSomStepIndex = formPages.findIndex(
+  (page) => page.title.toLowerCase().replace(/\s+/g, '') === 'tamsamsom',
+)
 
 const slugify = (value: string) =>
   value
@@ -39,14 +67,108 @@ const slugify = (value: string) =>
 const makeFieldId = (pageIndex: number, question: string) =>
   `step-${pageIndex}-${slugify(question)}`
 
+const asText = (value: unknown) => {
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value)
+  }
+  if (value && typeof value === 'object') {
+    return JSON.stringify(value)
+  }
+  return ''
+}
+
+const parseAiResult = (
+  text: string,
+): { tam: string; sam: string; som: string } | null => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const tryParseJson = (raw: string) => {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      const tam = asText(parsed.tam ?? parsed.TAM)
+      const sam = asText(parsed.sam ?? parsed.SAM)
+      const som = asText(parsed.som ?? parsed.SOM)
+      if (tam && sam && som) {
+        return { tam, sam, som }
+      }
+    } catch {
+      /* noop */
+    }
+    return null
+  }
+
+  const jsonCandidate = tryParseJson(trimmed)
+  if (jsonCandidate) {
+    return jsonCandidate
+  }
+
+  const blockMatch = trimmed.match(/\{[\s\S]+\}/)
+  if (blockMatch) {
+    const blockParsed = tryParseJson(blockMatch[0])
+    if (blockParsed) {
+      return blockParsed
+    }
+  }
+
+  const sections: Record<'tam' | 'sam' | 'som', string> = {
+    tam: '',
+    sam: '',
+    som: '',
+  }
+  const regex = /(TAM|SAM|SOM)[^:]*:\s*([\s\S]*?)(?=(TAM|SAM|SOM)[^:]*:|$)/gi
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(trimmed)) !== null) {
+    const key = match[1].toLowerCase() as 'tam' | 'sam' | 'som'
+    sections[key] = match[2].trim()
+  }
+
+  if (sections.tam && sections.sam && sections.som) {
+    return sections
+  }
+
+  return null
+}
+
+const extractMessageContent = (content: PerplexityChatMessage['content']): string => {
+  if (typeof content === 'string') {
+    return content
+  }
+  if (!Array.isArray(content)) {
+    return ''
+  }
+  return content
+    .map((chunk) => {
+      if (!chunk) {
+        return ''
+      }
+      if (typeof chunk === 'string') {
+        return chunk
+      }
+      if (typeof chunk === 'object' && 'text' in chunk && typeof chunk.text === 'string') {
+        return chunk.text
+      }
+      return ''
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
 function App() {
   const [currentStep, setCurrentStep] = useState(0)
   const [answers, setAnswers] = useState<AnswerMap>({})
   const [statusMessage, setStatusMessage] = useState<StatusMessage | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [isResearching, setIsResearching] = useState(false)
 
   const isSummaryStep = currentStep === summaryStepIndex
   const progressPercent = (currentStep / (stepLabels.length - 1)) * 100
+  const isTamSamSomStep = currentStep === tamSamSomStepIndex
 
   const setSuccess = useCallback(
     (text: string) => setStatusMessage({ type: 'success', text }),
@@ -211,6 +333,113 @@ function App() {
       ? 'Ver resumen'
       : 'Siguiente'
 
+  const buildBusinessContext = useCallback(() => {
+    if (tamSamSomStepIndex <= 0) {
+      return 'Sin respuestas previas disponibles.'
+    }
+
+    const sections = formPages
+      .slice(0, tamSamSomStepIndex)
+      .map((page, pageIndex) => {
+        const entries = page.items
+          .map((item) => {
+            const fieldId = makeFieldId(pageIndex, item.question)
+            const answer = answers[fieldId]
+            if (!answer?.trim()) {
+              return null
+            }
+            return `- ${item.question}: ${answer.trim()}`
+          })
+          .filter(Boolean)
+        if (entries.length === 0) {
+          return null
+        }
+        return `${page.title}:\n${entries.join('\n')}`
+      })
+      .filter(Boolean)
+
+    return sections.length > 0 ? sections.join('\n\n') : 'Sin respuestas previas disponibles.'
+  }, [answers, tamSamSomStepIndex])
+
+  const handleResearchUsingAi = useCallback(async () => {
+    if (tamSamSomStepIndex === -1) {
+      setError('No encontramos la sección de mercado para ejecutar la investigación.')
+      return
+    }
+
+    if (!tamsamsomPrompt) {
+      setError('El prompt de investigación no está disponible.')
+      return
+    }
+
+    const apiKey = import.meta.env.VITE_PERPLEXITY_API_KEY
+    if (!apiKey) {
+      setError('Configura VITE_PERPLEXITY_API_KEY en tu archivo .env para usar la investigación.')
+      return
+    }
+
+    setIsResearching(true)
+    try {
+      const response = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'sonar-pro',
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: `${tamsamsomPrompt}\n${buildBusinessContext()}`,
+            },
+          ],
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('La API de Perplexity respondió con un error.')
+      }
+
+      const payload = (await response.json()) as PerplexityChatCompletionResponse
+      const firstChoice = payload.choices?.[0]
+      const aiText = extractMessageContent(firstChoice?.message?.content ?? '')
+      if (!aiText.trim()) {
+        throw new Error('La respuesta de la IA vino vacía.')
+      }
+
+      const structured = parseAiResult(aiText)
+      if (!structured) {
+        throw new Error('No pudimos interpretar la respuesta del modelo.')
+      }
+
+      const itemIds = formPages[tamSamSomStepIndex].items.map((item) =>
+        makeFieldId(tamSamSomStepIndex, item.question),
+      )
+      if (itemIds.length < 3) {
+        throw new Error('No encontramos los campos de TAM, SAM y SOM en el formulario.')
+      }
+
+      setAnswers((prev) => ({
+        ...prev,
+        [itemIds[0]]: structured.tam,
+        [itemIds[1]]: structured.sam,
+        [itemIds[2]]: structured.som,
+      }))
+      setSuccess('Investigación completada con IA.')
+    } catch (error) {
+      console.error('Perplexity search error', error)
+      setError(
+        error instanceof Error
+          ? error.message
+          : 'No pudimos completar la investigación automática.',
+      )
+    } finally {
+      setIsResearching(false)
+    }
+  }, [buildBusinessContext, setError, setSuccess, tamSamSomStepIndex, tamsamsomPrompt])
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -264,6 +493,24 @@ function App() {
               </p>
               <h2>{currentPage.title}</h2>
             </header>
+            {isTamSamSomStep && (
+              <div className="ai-research-banner">
+                <div>
+                  <p>
+                    Usa tus respuestas previas para estimar TAM, SAM y SOM automáticamente con
+                    Perplexity.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={handleResearchUsingAi}
+                  disabled={isResearching}
+                >
+                  {isResearching ? 'Investigando...' : 'Research using AI'}
+                </button>
+              </div>
+            )}
 
             <form className="form-grid" onSubmit={(event) => event.preventDefault()}>
               {currentPage.items.map((item, itemIndex) => {
