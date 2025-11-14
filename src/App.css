@@ -215,6 +215,49 @@
   min-width: 210px;
 }
 
+.prefill-brief {
+  border-radius: 24px;
+  border: 1px dashed rgba(14, 165, 233, 0.4);
+  background: linear-gradient(120deg, rgba(224, 242, 254, 0.6), #fff);
+  padding: 1.25rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.prefill-brief-eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+  color: #0ea5e9;
+}
+
+.prefill-brief-description {
+  margin: 0;
+  color: #475569;
+}
+
+.prefill-brief small {
+  color: #475569;
+}
+
+.prefill-brief-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.prefill-brief-actions span {
+  color: #475569;
+  font-size: 0.9rem;
+}
+
+.prefill-brief .primary-button {
+  min-width: 200px;
+}
+
 .page-count {
   font-size: 0.85rem;
   letter-spacing: 0.08em;

@@ -76,6 +76,17 @@ type AiActionConfig = {
   model?: string
 }
 
+type FormFieldDescriptor = {
+  fieldId: string
+  pageTitle: string
+  question: string
+}
+
+type PrefillAnswerEntry = {
+  fieldId: string
+  value: string
+}
+
 marked.setOptions({
   gfm: true,
   breaks: true,
@@ -120,6 +131,22 @@ const estadoQuestionId = (() => {
   return item ? makeFieldId(pageIndex, item.question) : null
 })()
 const estadoOptions = ['Idea', 'Prototipo', 'Ventas iniciales', 'Escala'] as const
+
+const formFieldDescriptors: FormFieldDescriptor[] = formPages.flatMap((page, pageIndex) =>
+  page.items.map((item) => ({
+    fieldId: makeFieldId(pageIndex, item.question),
+    pageTitle: page.title,
+    question: item.question,
+  })),
+)
+
+const validFieldIdSet = new Set(formFieldDescriptors.map((field) => field.fieldId))
+
+const fieldsCatalogForPrompt = formFieldDescriptors
+  .map((field) => `- ${field.fieldId}: [${field.pageTitle}] ${field.question}`)
+  .join('\n')
+
+const prefillFieldId = 'prefill-brief-markdown'
 
 const asText = (value: unknown) => {
   if (typeof value === 'string') {
@@ -352,6 +379,117 @@ const applyOnePagerResult = (text: string, stepIndex: number): AnswerMap => {
   }
 }
 
+const normalizePrefillEntries = (input: unknown): PrefillAnswerEntry[] | null => {
+  if (!input) {
+    return null
+  }
+
+  if (Array.isArray(input)) {
+    const entries = input
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') {
+          return null
+        }
+        const record = entry as Record<string, unknown>
+        const fieldId = asText(record.fieldId ?? record.id ?? record.field ?? record.key)
+        const value = asText(record.value ?? record.answer ?? record.text ?? record.content)
+        if (!fieldId || !value) {
+          return null
+        }
+        return { fieldId, value }
+      })
+      .filter(Boolean) as PrefillAnswerEntry[]
+
+    return entries.length ? entries : null
+  }
+
+  if (typeof input === 'object') {
+    const record = input as Record<string, unknown>
+    const nestedKeys = ['answers', 'filledAnswers', 'fields', 'entries', 'items', 'data']
+    for (const key of nestedKeys) {
+      if (record[key] !== undefined) {
+        const nested = normalizePrefillEntries(record[key])
+        if (nested?.length) {
+          return nested
+        }
+      }
+    }
+
+    const directEntries = Object.entries(record)
+      .map(([fieldId, rawValue]) => {
+        if (!validFieldIdSet.has(fieldId)) {
+          return null
+        }
+        const value = asText(rawValue)
+        if (!value) {
+          return null
+        }
+        return { fieldId, value }
+      })
+      .filter(Boolean) as PrefillAnswerEntry[]
+
+    return directEntries.length ? directEntries : null
+  }
+
+  if (typeof input === 'string') {
+    try {
+      const parsed = JSON.parse(input)
+      return normalizePrefillEntries(parsed)
+    } catch {
+      return null
+    }
+  }
+
+  return null
+}
+
+const applyPrefillResult = (text: string): AnswerMap => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    throw new Error('La IA no devolvió un JSON con campos a pre-rellenar.')
+  }
+
+  const tryParse = (payload: string) => {
+    try {
+      const parsed = JSON.parse(payload) as unknown
+      return normalizePrefillEntries(parsed)
+    } catch {
+      return null
+    }
+  }
+
+  let entries = tryParse(trimmed)
+  if (!entries) {
+    const blockMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)```/)
+    if (blockMatch) {
+      entries = tryParse(blockMatch[1])
+    }
+  }
+  if (!entries) {
+    const firstBrace = trimmed.indexOf('{')
+    const lastBrace = trimmed.lastIndexOf('}')
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      entries = tryParse(trimmed.slice(firstBrace, lastBrace + 1))
+    }
+  }
+
+  if (!entries) {
+    throw new Error('No pudimos interpretar los campos pre-rellenados enviados por la IA.')
+  }
+
+  const recognizedEntries = entries.filter(
+    (entry) => validFieldIdSet.has(entry.fieldId) && entry.value.trim(),
+  )
+  if (!recognizedEntries.length) {
+    throw new Error('La IA no devolvió campos conocidos para completar.')
+  }
+
+  return recognizedEntries.reduce<AnswerMap>((acc, entry) => {
+    acc[entry.fieldId] = entry.value.trim()
+    return acc
+  }, {})
+}
+
 const extractMessageContent = (content: PerplexityChatMessage['content']): string => {
   if (typeof content === 'string') {
     return content
@@ -506,8 +644,11 @@ function App() {
   const [dragActive, setDragActive] = useState(false)
   const [activeAiAction, setActiveAiAction] = useState<AiActionKey | null>(null)
   const [editingMarkdownField, setEditingMarkdownField] = useState<string | null>(null)
+  const [prefillMarkdown, setPrefillMarkdown] = useState('')
+  const [isPrefillLoading, setIsPrefillLoading] = useState(false)
 
   const isSummaryStep = currentStep === summaryStepIndex
+  const isFirstStep = currentStep === 0
   const progressPercent = (currentStep / (stepLabels.length - 1)) * 100
 
   const setSuccess = useCallback(
@@ -680,6 +821,9 @@ function App() {
   const isAiActionLoading = activeAiAction !== null
   const isCurrentActionLoading =
     currentAiActionKey !== null && activeAiAction === currentAiActionKey
+  const hasPrefillContext = Boolean(prefillMarkdown.trim())
+  const prefillHelpId = `${prefillFieldId}-help`
+  const isPrefillEditing = editingMarkdownField === prefillFieldId
 
   const buildBusinessContext = useCallback((targetStepIndex: number) => {
     if (targetStepIndex <= 0) {
@@ -776,6 +920,86 @@ function App() {
     [buildBusinessContext, setError, setSuccess],
   )
 
+  const handlePrefillWithAi = useCallback(async () => {
+    const brief = prefillMarkdown.trim()
+    if (!brief) {
+      setError('Pegá el contenido en Markdown antes de pedir el pre-relleno.')
+      return
+    }
+
+    const promptText = (prompts?.prefill ?? '').trim()
+    if (!promptText) {
+      setError('El prompt para pre-rellenar con IA no está disponible.')
+      return
+    }
+
+    const apiKey = import.meta.env.VITE_PERPLEXITY_API_KEY
+    if (!apiKey) {
+      setError('Configura VITE_PERPLEXITY_API_KEY en tu archivo .env para usar la investigación.')
+      return
+    }
+
+    setIsPrefillLoading(true)
+    try {
+      const response = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: 'sonar-reasoning-pro',
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'user',
+              content: `${promptText}\n${fieldsCatalogForPrompt}\n\nBrief en Markdown:\n${brief}`,
+            },
+          ],
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error('La API de Perplexity respondió con un error.')
+      }
+
+      const payload = (await response.json()) as PerplexityChatCompletionResponse
+      const aiText = extractMessageContent(payload.choices?.[0]?.message?.content ?? '')
+      if (!aiText.trim()) {
+        throw new Error('La respuesta de la IA vino vacía.')
+      }
+
+      const updates = applyPrefillResult(aiText)
+      const sanitizedEntries = Object.entries(updates).filter(([fieldId, value]) => {
+        const trimmedValue = value?.trim()
+        if (!trimmedValue) {
+          return false
+        }
+        const existing = answers[fieldId]
+        return !existing?.trim()
+      })
+
+      if (!sanitizedEntries.length) {
+        throw new Error(
+          'La IA no encontró campos vacíos para completar con el brief proporcionado.',
+        )
+      }
+
+      const sanitizedUpdates = Object.fromEntries(sanitizedEntries)
+      setAnswers((prev) => ({ ...prev, ...sanitizedUpdates }))
+      setSuccess('Pre-rellenamos algunos campos usando tu brief. Revisalos antes de avanzar.')
+    } catch (error) {
+      console.error('Prefill chat error', error)
+      setError(
+        error instanceof Error
+          ? error.message
+          : 'No pudimos pre-rellenar los campos automáticamente.',
+      )
+    } finally {
+      setIsPrefillLoading(false)
+    }
+  }, [answers, prefillMarkdown, setError, setSuccess])
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -829,6 +1053,51 @@ function App() {
               </p>
               <h2>{currentPage.title}</h2>
             </header>
+            {isFirstStep && (
+              <section className="prefill-brief" aria-labelledby={`${prefillFieldId}-label`}>
+                <div className="prefill-brief-copy">
+                  <p className="prefill-brief-eyebrow">Acelera tu primer paso</p>
+                  <h3 id={`${prefillFieldId}-label`}>¿Tenés un brief listo en Markdown?</h3>
+                  <p className="prefill-brief-description">
+                    Pegá aquí cualquier texto largo que describa tu negocio. Si encontramos datos
+                    confiables pre-rellenaremos los campos y pediremos aclaraciones usando mensajes
+                    en <strong>NEGRITA MAYÚSCULA</strong>. Podés dejarlo vacío si preferís completar
+                    campo por campo.
+                  </p>
+                </div>
+                <MarkdownEditor
+                  fieldId={prefillFieldId}
+                  value={prefillMarkdown}
+                  rows={8}
+                  ariaDescribedBy={prefillHelpId}
+                  ariaLabelledBy={`${prefillFieldId}-label`}
+                  isEditing={isPrefillEditing}
+                  onStartEditing={() => setEditingMarkdownField(prefillFieldId)}
+                  onStopEditing={() =>
+                    setEditingMarkdownField((current) => (current === prefillFieldId ? null : current))
+                  }
+                  onChangeValue={(value) => setPrefillMarkdown(value)}
+                />
+                <small id={prefillHelpId}>
+                  Este paso es opcional. Nos limitaremos a rellenar campos respaldados por el brief y
+                  destacaremos las dudas con mensajes en negrita y mayúsculas.
+                </small>
+                <div className="prefill-brief-actions">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={handlePrefillWithAi}
+                    disabled={!hasPrefillContext || isPrefillLoading}
+                  >
+                    {isPrefillLoading ? 'Pre-rellenando...' : 'Pre-rellenar con IA'}
+                  </button>
+                  <span>
+                    Solo completamos campos con evidencia explícita; de lo contrario verás mensajes
+                    como <code>**PLEASE ENTER MANUALLY**</code>.
+                  </span>
+                </div>
+              </section>
+            )}
             {currentAiAction && currentAiActionKey && (
               <div className="ai-research-banner">
                 <div>
