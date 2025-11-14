@@ -136,6 +136,36 @@
       ]
     },
     {
+      "title": "ANÁLISIS PORTER",
+      "items": [
+        {
+          "area": "Estrategia",
+          "question": "El poder de negociación de los clientes",
+          "help": "Los clientes tienen una gran fuerza cuando: Son pocos pero compran en grandes cantidades. Cuando los productos del mercado en general son muy parecidos y hay muchos disponibles. También cuando para el cliente, el cambio de proveedor o de marca no supone un coste."
+        },
+        {
+          "area": "Estrategia",
+          "question": "El poder de negociación de los proveedores",
+          "help": "¿Les resulta fácil a mis proveedores encontrar clientes? ¿Están obligados a subir los precios? ¿Está la industria de los proveedores más concentrada que mi industria?"
+        },
+        {
+          "area": "Estrategia",
+          "question": "La amenaza de los productos sustitutos",
+          "help": "Ofrecen mejor calidad. El coste del cambio no es elevado. El precio es inferior."
+        },
+        {
+          "area": "Estrategia",
+          "question": "La amenaza de los nuevos competidores",
+          "help": "¿Qué inversiones de capital necesitan estos nuevos competidores para entrar en el mercado? ¿Tienen acceso fácil a los canales de distribución y canales de venta? ¿Cuentan con economías de escala significativas? ¿Cuál es la fortaleza de su imagen de marca? ¿Tienen fácil acceso a los mismos recursos?"
+        },
+        {
+          "area": "Estrategia",
+          "question": "La rivalidad entre los competidores existentes",
+          "help": "¿Pueden los competidores bajar los precios fácilmente? ¿Cuáles son los objetivos estratégicos de la competencia? ¿Cuál es la estructura de costes de la industria? ¿Cómo se diferencian los productos? ¿Cuál es la tasa del crecimiento del sector?"
+        }
+      ]
+    },
+    {
       "title": "ONE PAGER",
       "items": [
         {

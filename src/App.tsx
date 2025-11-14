@@ -64,7 +64,7 @@ type CompetitorEntry = {
   successLikelihood: string
 }
 
-type AiActionKey = 'tamsamsom' | 'competitors' | 'onepager'
+type AiActionKey = 'tamsamsom' | 'competitors' | 'porter' | 'onepager'
 
 type AiActionConfig = {
   stepIndex: number
@@ -101,6 +101,9 @@ const tamSamSomStepIndex = formPages.findIndex(
 )
 const competitorListStepIndex = formPages.findIndex(
   (page) => page.title.toLowerCase().replace(/\s+/g, '') === 'listadecompetidores',
+)
+const porterStepIndex = formPages.findIndex(
+  (page) => page.title.toLowerCase().replace(/\s+/g, '') === 'análisisporter',
 )
 const onePagerStepIndex = formPages.findIndex(
   (page) => page.title.toLowerCase().replace(/\s+/g, '') === 'onepager',
@@ -361,6 +364,82 @@ const applyCompetitorsResult = (text: string, stepIndex: number): AnswerMap => {
   }
 }
 
+const parsePorterResult = (
+  text: string,
+): {
+  clientPower: string
+  supplierPower: string
+  substitutesThreat: string
+  newEntrantsThreat: string
+  competitiveRivalry: string
+} | null => {
+  const trimmed = text.trim()
+  if (!trimmed) {
+    return null
+  }
+
+  const tryParseJson = (raw: string) => {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>
+      if (
+        typeof parsed.clientPower === 'string' &&
+        typeof parsed.supplierPower === 'string' &&
+        typeof parsed.substitutesThreat === 'string' &&
+        typeof parsed.newEntrantsThreat === 'string' &&
+        typeof parsed.competitiveRivalry === 'string'
+      ) {
+        return {
+          clientPower: parsed.clientPower,
+          supplierPower: parsed.supplierPower,
+          substitutesThreat: parsed.substitutesThreat,
+          newEntrantsThreat: parsed.newEntrantsThreat,
+          competitiveRivalry: parsed.competitiveRivalry,
+        }
+      }
+      return null
+    } catch {
+      return null
+    }
+  }
+
+  const direct = tryParseJson(trimmed)
+  if (direct) {
+    return direct
+  }
+
+  const blockMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)```/)
+  if (blockMatch) {
+    const blockParsed = tryParseJson(blockMatch[1])
+    if (blockParsed) {
+      return blockParsed
+    }
+  }
+
+  return null
+}
+
+const applyPorterResult = (text: string, stepIndex: number): AnswerMap => {
+  const structured = parsePorterResult(text)
+  if (!structured) {
+    throw new Error('No pudimos interpretar el análisis Porter devuelto por la IA.')
+  }
+
+  const items = formPages[stepIndex]?.items ?? []
+  if (items.length < 5) {
+    throw new Error('No encontramos los 5 campos del análisis Porter en el formulario.')
+  }
+
+  const itemIds = items.map((item) => makeFieldId(stepIndex, item.question))
+
+  return {
+    [itemIds[0]]: structured.clientPower,
+    [itemIds[1]]: structured.supplierPower,
+    [itemIds[2]]: structured.substitutesThreat,
+    [itemIds[3]]: structured.newEntrantsThreat,
+    [itemIds[4]]: structured.competitiveRivalry,
+  }
+}
+
 const applyOnePagerResult = (text: string, stepIndex: number): AnswerMap => {
   const trimmed = text.trim()
   if (!trimmed) {
@@ -532,6 +611,15 @@ const aiActionConfigs: Record<AiActionKey, AiActionConfig> = {
       'Genera una lista priorizada de competidores con IA usando todo el contexto anterior.',
     successMessage: 'Lista de competidores generada con IA.',
     parseResult: applyCompetitorsResult,
+  },
+  porter: {
+    stepIndex: porterStepIndex,
+    promptKey: 'porter',
+    buttonLabel: 'Analizar con IA',
+    description:
+      'Realiza un análisis de las 5 fuerzas de Porter con IA usando todo el contexto del proyecto.',
+    successMessage: 'Análisis Porter completado con IA.',
+    parseResult: applyPorterResult,
   },
   onepager: {
     stepIndex: onePagerStepIndex,
